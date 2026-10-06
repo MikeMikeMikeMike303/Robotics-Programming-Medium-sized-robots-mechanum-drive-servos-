@@ -26,8 +26,8 @@ import java.util.Map;
  * in that original direction. The IMU measures rotation; it does not track the
  * robot's position or automatically know which direction on the field is forward.
  */
-@TeleOp(name="Rebuildv6", group="Iterative Opmode")
-public class Rebuildv6 extends OpMode {
+@TeleOp(name="FinalRebuilds", group="Iterative Opmode")
+public class FinalRebuilds extends OpMode {
     private DcMotor backLeftMotor;
     private DcMotor backRightMotor;
     private DcMotor frontLeftMotor;
@@ -594,7 +594,7 @@ public class Rebuildv6 extends OpMode {
     }
 
     private void showArmTelemetry() {
-        telemetry.addData("Code", "Rebuildv6 - optional presets");
+        telemetry.addData("Code", "FinalRebuilds - optional presets");
         showDriveControlsTelemetry();
         telemetry.addData("Arm mode", calibrationMode ? "CALIBRATION - drive stopped"
                 : (calibrationLoaded ? "Normal - limits locked" : "Needs calibration - arm commands disabled"));

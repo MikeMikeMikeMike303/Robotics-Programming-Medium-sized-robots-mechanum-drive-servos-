@@ -1,4 +1,5 @@
 package org.firstinspires.ftc.teamcode;
+
 import android.content.Context;
 import android.content.SharedPreferences;
 // Describes how the REV Hub is physically mounted on the robot.
@@ -58,19 +59,38 @@ public class FinalRebuilds extends OpMode {
     private double headingCorrection;
     private String imuMessage = "";
 
-    // ONE target and ONE pair of limits control BOTH facing positional servos.
-    // Servo positions are commands, not measured arm angles.
-    private static final double ARM_START = 0.50; // First calibration's starting command.
+    // Normal driving uses ONE arm progress value: 0 = lowered, 1 = raised.
+    // Each servo maps that progress through its OWN taught endpoint commands.
+    // These are commands, not measured angles or guaranteed physical synchronization.
+    private static final double ARM_START = 0.50;
     private static final double ARM_RATE_PER_SECOND = 0.10; // D-pad only.
+    private static final double MIN_CALIBRATED_SPAN = 0.01;
     private double armPosition = ARM_START;
-    private double armLowerLimit = 0.0;
-    private double armUpperLimit = 1.0;
     private double armStartupPosition = ARM_START;
+    // Index 0 = left, index 1 = right. NaN means an endpoint has not been taught.
+    private final double[] servoLowerLimits = {Double.NaN, Double.NaN};
+    private final double[] servoUpperLimits = {Double.NaN, Double.NaN};
+    private final boolean[] servoCalibrated = {false, false};
+    private final String[] servoNames = {"LEFT", "RIGHT"};
     private boolean calibrationMode;
-    private boolean calibrationLoaded;
+    private boolean synchronizedCalibrationSelected;
+    private boolean calibrationLoaded; // Normal arm controls require BOTH sides.
+    private int calibrationServo = -1; // -1 = normal, 0 = left, 1 = right, 2 = synchronized.
+    // Working calibration is separate from the confirmed saved endpoints.
+    // Individual setup uses raw servo commands; SYNC uses shared reference progress.
+    private double calibrationPosition;
+    private double calibrationLower;
+    private double calibrationUpper;
     private boolean lowerLimitSet;
     private boolean upperLimitSet;
+    private boolean wasSharePressed;
     private boolean wasOptionsPressed;
+    // Defer a short Options action until release, so a hold cannot also act as a tap.
+    private static final double OPTIONS_LONG_PRESS_SECONDS = 1.0;
+    private final ElapsedTime optionsHoldTimer = new ElapsedTime();
+    private boolean optionsPressPending;
+    private boolean optionsLongPressHandled;
+    private boolean optionsPressValid;
     // PlayStation Cross = a; Square = x; Triangle = y; Circle = b; Options = start.
     private boolean wasCrossPressed;
     private boolean wasSquarePressed;
@@ -99,8 +119,8 @@ public class FinalRebuilds extends OpMode {
         servoMotorRight = hardwareMap.get(Servo.class, "front_right_servo");
 
         // Opposing shafts require mirrored physical rotation. REVERSE makes the
-        // right servo mirror the shared target, so do NOT also send it 1 - target.
-        // This assumes matching positional servos with mechanically aligned horns.
+        // right servo mirror its mapped target, so do NOT also send it 1 - target.
+        // Independent endpoint calibration accounts for each horn's alignment.
         servoMotorLeft.setDirection(Servo.Direction.FORWARD);
         servoMotorRight.setDirection(Servo.Direction.REVERSE);
         servoMotorLeft.scaleRange(0.0, 1.0);
@@ -139,8 +159,8 @@ public class FinalRebuilds extends OpMode {
             armPosition = armStartupPosition;
             applyArmPositionToBothServos(); // INIT can move the arm to the saved target.
         }
-        // Without calibration, INIT sends no new arm position. Enter calibration
-        // after PLAY; its first command is ARM_START (0.50), so support the arm.
+        // With an incomplete pair, INIT sends no new arm position. Individual
+        // calibration only commands the selected servo after a D-pad movement.
 
         // Keep the calibration indicator first on the Driver Station display.
         showCalibrationIndicator();
@@ -148,9 +168,9 @@ public class FinalRebuilds extends OpMode {
 
         // Show a setup reminder on the Driver Station; update() sends it.
         telemetry.addLine("Face field-forward before pressing PLAY.");
-        telemetry.addLine("Arm: D-pad Up raises; Down lowers; release holds target.");
+        telemetry.addLine("Normal arm: D-pad Up raises; Down lowers; release holds target.");
         telemetry.addLine("Circle: drive mode; L1/R1: precision; Triangle: reset heading.");
-        telemetry.addLine("Options: calibration; Cross: minimum; Square: maximum.");
+        telemetry.addLine("Share: LEFT; tap Options: RIGHT; hold Options 1s: SYNC; Cross: min; Square: max.");
         showArmTelemetry();
         telemetry.addData("Left servo connection", servoMotorLeft.getConnectionInfo());
         telemetry.addData("Right servo connection", servoMotorRight.getConnectionInfo());
@@ -168,7 +188,12 @@ public class FinalRebuilds extends OpMode {
         armTimer.reset();
         wasCrossPressed = gamepad1.a;
         wasSquarePressed = gamepad1.x;
+        wasSharePressed = gamepad1.back;
         wasOptionsPressed = gamepad1.start;
+        optionsPressPending = false;
+        optionsLongPressHandled = gamepad1.start; // Ignore a button already held at PLAY.
+        optionsPressValid = false;
+        optionsHoldTimer.reset();
         wasTrianglePressed = gamepad1.y;
         wasCirclePressed = gamepad1.b;
         boolean[] presetButtons = presetButtons();
@@ -183,7 +208,7 @@ public class FinalRebuilds extends OpMode {
         showCalibrationIndicator();
         showStartupStatus();
         showArmTelemetry();
-        telemetry.addLine("INIT: press PLAY to move arm.");
+        telemetry.addLine("INIT: setup buttons work after PLAY; valid saved pair may already park the arm.");
         telemetry.update();
     }
 
@@ -201,7 +226,7 @@ public class FinalRebuilds extends OpMode {
         wasTrianglePressed = gamepad1.y;
         wasCirclePressed = gamepad1.b;
         updateArm(); // Calibration mode is also used to stop the chassis below.
-        showCalibrationIndicator(); // Display the mode AFTER processing Options.
+        showCalibrationIndicator(); // Display the mode AFTER processing setup buttons.
 
         // Deadband removes center drift and rescales the rest of the stick range
         // so a full stick STILL commands 1.0. Preserve your original drive signs.
@@ -241,7 +266,7 @@ public class FinalRebuilds extends OpMode {
         }
         // Full power normally; precision only while L1/R1 is held.
         // Arm calibration stops all drive motors so stick bumps cannot move chassis.
-        double driveScale = calibrationMode ? 0.0
+        double driveScale = calibrationMode || optionsPressPending ? 0.0
                 : (gamepad1.left_bumper || gamepad1.right_bumper ? PRECISION_POWER : 1.0);
 
         // Keep motor powers within [-1, 1], preserving their proportions.
@@ -319,43 +344,65 @@ public class FinalRebuilds extends OpMode {
         }
     }
 
-    private boolean validArmCalibration(double lower, double upper, double startup) {
-        // Explicit finite checks also reject corrupt stored data.
-        return !Double.isNaN(lower) && !Double.isNaN(upper) && !Double.isNaN(startup)
-                && lower >= 0.0 && upper <= 1.0 && lower < upper
-                && startup >= lower && startup <= upper;
+    private boolean unitPosition(double position) {
+        // Range comparisons also reject NaN and infinity.
+        return position >= 0.0 && position <= 1.0;
+    }
+
+    private boolean validServoCalibration(double lower, double upper) {
+        // These labels mean physical lowered/raised poses. Either logical command
+        // direction is allowed. The small span prevents division by (nearly) zero;
+        // tolerance permits endpoints saved as Android floats to reload correctly.
+        return unitPosition(lower) && unitPosition(upper)
+                && Math.abs(upper - lower) >= MIN_CALIBRATED_SPAN - 0.000001;
+    }
+
+    private double readArmFloat(Map<String, ?> settings, String key) {
+        Object value = settings.get(key);
+        if (value instanceof Float) return (Float) value;
+        if (settings.containsKey(key)) settingsMessage = "Unexpected stored setting type: " + key;
+        return Double.NaN;
+    }
+
+    private boolean readArmBoolean(Map<String, ?> settings, String key) {
+        Object value = settings.get(key);
+        if (value instanceof Boolean) return (Boolean) value;
+        if (settings.containsKey(key)) settingsMessage = "Unexpected stored setting type: " + key;
+        return false;
     }
 
     private void loadArmCalibration() {
+        // Old shared-command limits cannot safely represent two independent sides.
+        // Use separate storage; this version requires each side to be taught once.
         armSettings = hardwareMap.appContext.getSharedPreferences(
-                "GameSpecificRebuild.arm.v1", Context.MODE_PRIVATE);
-        double lower = armSettings.getFloat("lower", Float.NaN);
-        double upper = armSettings.getFloat("upper", Float.NaN);
-        double startup = armSettings.getFloat("startup", Float.NaN);
-        calibrationLoaded = armSettings.getBoolean("valid", false)
-                && validArmCalibration(lower, upper, startup);
+                "FinalRebuilds.arm.independent.v1", Context.MODE_PRIVATE);
+        Map<String, ?> saved = armSettings.getAll();
+        for (int i = 0; i < servoCalibrated.length; i++) {
+            String side = i == 0 ? "left" : "right";
+            servoLowerLimits[i] = readArmFloat(saved, side + "Lower");
+            servoUpperLimits[i] = readArmFloat(saved, side + "Upper");
+            servoCalibrated[i] = readArmBoolean(saved, side + "Valid")
+                    && validServoCalibration(servoLowerLimits[i], servoUpperLimits[i]);
+        }
+        double startup = readArmFloat(saved, "startup");
+        calibrationLoaded = servoCalibrated[0] && servoCalibrated[1] && unitPosition(startup);
         if (calibrationLoaded) {
-            armLowerLimit = lower;
-            armUpperLimit = upper;
             armStartupPosition = startup;
-            lowerLimitSet = true;
-            upperLimitSet = true;
-            armMessage = "Saved calibration loaded. INIT commands saved startup target.";
+            armMessage = "BOTH calibrations loaded. INIT commands mapped saved parking position.";
         } else {
-            armMessage = "No valid calibration. Options enters setup; first command is 0.50.";
+            armMessage = "Teach LEFT with Share and RIGHT with Options before normal arm movement.";
         }
     }
 
-    private boolean saveArmCalibration() {
-        // Save both limits and the current target together. This is the startup
-        // target: exit calibration with the arm in your chosen parking position.
-        // commit() reports whether disk writing succeeded; never claim a failed save.
-        SharedPreferences.Editor editor = armSettings.edit().putFloat("lower", (float) armLowerLimit)
-                .putFloat("upper", (float) armUpperLimit)
-                .putFloat("startup", (float) armPosition)
-                .putBoolean("valid", true)
-                // Recalibrating changes what arm positions mean. Remove presets
-                // in the SAME successful write. The helper restores a failed write.
+    private boolean saveArmCalibration(double parkingProgress) {
+        String side = calibrationServo == 0 ? "left" : "right";
+        // Save ONLY this side, preserving the other side's confirmed endpoints.
+        // Recalibration changes the mapping, so clear all presets in the same write.
+        SharedPreferences.Editor editor = armSettings.edit()
+                .putFloat(side + "Lower", (float) calibrationLower)
+                .putFloat(side + "Upper", (float) calibrationUpper)
+                .putBoolean(side + "Valid", true)
+                .putFloat("startup", (float) parkingProgress)
                 .putFloat("presetPickup", Float.NaN)
                 .putFloat("presetCarry", Float.NaN)
                 .putFloat("presetPlace", Float.NaN);
@@ -370,8 +417,10 @@ public class FinalRebuilds extends OpMode {
         // Android changes its preferences cache even when commit() reports a
         // disk failure. Keep a snapshot so a fresh OpMode cannot load that failure.
         Map<String, ?> previous = armSettings.getAll();
-        String[] floatKeys = {"lower", "upper", "startup", "presetPickup", "presetCarry",
-                "presetPlace", "presetLimitsLower", "presetLimitsUpper"};
+        String[] floatKeys = {"leftLower", "leftUpper", "rightLower", "rightUpper", "startup",
+                "presetPickup", "presetCarry", "presetPlace", "presetLeftLower", "presetLeftUpper",
+                "presetRightLower", "presetRightUpper"};
+        String[] booleanKeys = {"leftValid", "rightValid"};
         settingsMessage = "";
         // Do not overwrite an unexpected stored type that we cannot restore.
         for (String key : floatKeys) {
@@ -380,10 +429,11 @@ public class FinalRebuilds extends OpMode {
                 return false;
             }
         }
-        Object valid = previous.get("valid");
-        if (previous.containsKey("valid") && !(valid instanceof Boolean)) {
-            settingsMessage = "Unexpected stored setting type: valid";
-            return false;
+        for (String key : booleanKeys) {
+            if (previous.containsKey(key) && !(previous.get(key) instanceof Boolean)) {
+                settingsMessage = "Unexpected stored setting type: " + key;
+                return false;
+            }
         }
         if (editor.commit()) return true;
 
@@ -393,14 +443,126 @@ public class FinalRebuilds extends OpMode {
             if (value instanceof Float) restore.putFloat(key, (Float) value);
             else restore.remove(key); // Missing settings must stay missing.
         }
-        if (valid instanceof Boolean) restore.putBoolean("valid", (Boolean) valid);
-        else restore.remove("valid");
+        for (String key : booleanKeys) {
+            Object value = previous.get(key);
+            if (value instanceof Boolean) restore.putBoolean(key, (Boolean) value);
+            else restore.remove(key);
+        }
         // Even if disk writing fails again, this restores the in-process cache.
         // Return false: the requested new settings were NOT confirmed saved.
         if (!restore.commit()) {
             settingsMessage = "Cache restored; disk recovery unconfirmed. Retry the save.";
         }
         return false;
+    }
+
+    private boolean driveSticksCentered() {
+        return Math.abs(gamepad1.left_stick_x) <= STICK_DEADBAND
+                && Math.abs(gamepad1.left_stick_y) <= STICK_DEADBAND
+                && Math.abs(gamepad1.right_stick_x) <= STICK_DEADBAND;
+    }
+
+    private boolean anyPresetButton() {
+        return gamepad1.dpad_left || gamepad1.left_stick_button || gamepad1.dpad_right;
+    }
+
+    private Servo selectedCalibrationServo() {
+        return calibrationServo == 0 ? servoMotorLeft : servoMotorRight;
+    }
+
+    private void beginServoCalibration(int side) {
+        calibrationServo = side;
+        calibrationMode = true;
+        calibrationLower = servoLowerLimits[side];
+        calibrationUpper = servoUpperLimits[side];
+        lowerLimitSet = servoCalibrated[side];
+        upperLimitSet = servoCalibrated[side];
+        // getPosition() is the last command, not a measurement. If unavailable,
+        // the first manual command starts near 0.50. Entry itself sends NO command.
+        double lastCommand = selectedCalibrationServo().getPosition();
+        calibrationPosition = unitPosition(lastCommand) ? lastCommand : ARM_START;
+        armMessage = servoNames[side] + " setup: support arm; disconnect OTHER servo linkage."
+                + " D-pad changes this servo; Cross min; Square max; same setup button saves.";
+    }
+
+    private void beginSynchronizedCalibration() {
+        calibrationMode = true;
+        calibrationServo = 2;
+        // Keep the separate saved servo endpoints as our reference mapping.
+        // 0 and 1 initially represent the existing common lower and upper poses.
+        calibrationPosition = armPosition;
+        calibrationLower = 0.0;
+        calibrationUpper = 1.0;
+        lowerLimitSet = true;
+        upperLimitSet = true;
+        armMessage = "SYNC setup: D-pad moves BOTH through their own ranges."
+                + " Cross sets common min; Square common max; tap Options saves."
+                + " Hold Options 1 second to save and return to individual setup.";
+    }
+
+    private double[] synchronizedProgressBounds() {
+        // Find ONE shared travel range that keeps BOTH raw servo commands in 0..1.
+        // This can extend beyond the previous common limits while preserving each
+        // servo's alignment, without letting one hit its command endpoint early.
+        double lower = Double.NEGATIVE_INFINITY;
+        double upper = Double.POSITIVE_INFINITY;
+        for (int i = 0; i < servoCalibrated.length; i++) {
+            double span = servoUpperLimits[i] - servoLowerLimits[i];
+            double atZero = -servoLowerLimits[i] / span;
+            double atOne = (1.0 - servoLowerLimits[i]) / span;
+            lower = Math.max(lower, Math.min(atZero, atOne));
+            upper = Math.min(upper, Math.max(atZero, atOne));
+        }
+        return new double[] {lower, upper};
+    }
+
+    private boolean finishSynchronizedCalibration() {
+        double[] bounds = synchronizedProgressBounds();
+        if (!lowerLimitSet || !upperLimitSet || !(calibrationLower < calibrationUpper)
+                || calibrationLower < bounds[0] || calibrationUpper > bounds[1]
+                || Double.isNaN(calibrationPosition) || Double.isInfinite(calibrationPosition)
+                || calibrationPosition < calibrationLower || calibrationPosition > calibrationUpper) {
+            armMessage = "SYNC: set ordered common endpoints; park BETWEEN them before saving.";
+            return false;
+        }
+        double[] lowered = new double[2];
+        double[] raised = new double[2];
+        for (int i = 0; i < servoCalibrated.length; i++) {
+            lowered[i] = mappedServoCommand(i, calibrationLower);
+            raised[i] = mappedServoCommand(i, calibrationUpper);
+            if (!validServoCalibration(lowered[i], raised[i])) {
+                armMessage = "SYNC range too small: each servo needs at least 0.01 command span.";
+                return false;
+            }
+        }
+        double parkingProgress = (calibrationPosition - calibrationLower)
+                / (calibrationUpper - calibrationLower);
+        // Both DIFFERENT endpoint pairs and the parking fraction save atomically.
+        SharedPreferences.Editor editor = armSettings.edit()
+                .putFloat("leftLower", (float) lowered[0]).putFloat("leftUpper", (float) raised[0])
+                .putFloat("rightLower", (float) lowered[1]).putFloat("rightUpper", (float) raised[1])
+                .putBoolean("leftValid", true).putBoolean("rightValid", true)
+                .putFloat("startup", (float) parkingProgress)
+                .putFloat("presetPickup", Float.NaN).putFloat("presetCarry", Float.NaN)
+                .putFloat("presetPlace", Float.NaN);
+        if (!commitArmSettings(editor)) {
+            armMessage = "SYNC save failed; setup remains active. Tap Options to retry.";
+            return false;
+        }
+        for (int i = 0; i < servoCalibrated.length; i++) {
+            servoLowerLimits[i] = lowered[i];
+            servoUpperLimits[i] = raised[i];
+            servoCalibrated[i] = true;
+        }
+        armPosition = parkingProgress;
+        armStartupPosition = parkingProgress;
+        calibrationLoaded = true;
+        calibrationMode = false;
+        calibrationServo = -1;
+        for (int i = 0; i < armPresets.length; i++) armPresets[i] = Double.NaN;
+        presetMessage = "Synchronized calibration saved: all presets cleared.";
+        armMessage = "BOTH endpoint pairs and parking position saved together.";
+        return true;
     }
 
     private void updateArm() {
@@ -412,81 +574,156 @@ public class FinalRebuilds extends OpMode {
                 && !l2Pressed && !r2Pressed;
         boolean toggledCalibration = false;
 
-        // Options toggles calibration only with all arm movement/save buttons released.
+        boolean setupControlsReleased = movementReleased && !gamepad1.a && !gamepad1.x
+                && !anyPresetButton() && !gamepad1.right_stick_button;
+        boolean sharePressed = gamepad1.back && !wasSharePressed;
+        boolean optionsPressed = false;
+        boolean optionsLongPressed = false;
         if (gamepad1.start && !wasOptionsPressed) {
-            if (!movementReleased || gamepad1.a || gamepad1.x) {
-                armMessage = "Release arm controls, then press Options again.";
-            } else if (!calibrationMode) {
-                calibrationMode = true;
-                armMessage = "CALIBRATION: D-pad adjusts; Cross minimum; Square maximum; Options saves.";
-                toggledCalibration = true;
-            } else if (Math.abs(gamepad1.left_stick_x) > STICK_DEADBAND
-                    || Math.abs(gamepad1.left_stick_y) > STICK_DEADBAND
-                    || Math.abs(gamepad1.right_stick_x) > STICK_DEADBAND) {
-                // Leaving calibration restores drive power; require centered sticks.
-                armMessage = "Center drive sticks before leaving calibration.";
-            } else if (!lowerLimitSet || !upperLimitSet
-                    || !validArmCalibration(armLowerLimit, armUpperLimit, armPosition)) {
-                armMessage = "Set BOTH ordered limits; park BETWEEN them before saving.";
-            } else {
-                if (saveArmCalibration()) {
-                    armStartupPosition = armPosition; // Update only after a confirmed save.
-                    armPosition = armStartupPosition;
-                    calibrationLoaded = true;
-                    calibrationMode = false;
-                    for (int i = 0; i < armPresets.length; i++) armPresets[i] = Double.NaN;
-                    presetMessage = "Arm recalibrated: presets cleared; manual controls still work.";
-                    armMessage = "Limits and startup target saved on Robot Controller.";
+            optionsPressPending = true;
+            optionsLongPressHandled = false;
+            optionsPressValid = setupControlsReleased && driveSticksCentered() && !gamepad1.back;
+            optionsHoldTimer.reset();
+        }
+        if (optionsPressPending && (!setupControlsReleased || !driveSticksCentered() || gamepad1.back)) {
+            // An invalid hold stays invalid even if the conflicting control is
+            // released later. Release Options and make a fresh press to retry.
+            optionsPressValid = false;
+        }
+        if (gamepad1.start && optionsPressPending && !optionsLongPressHandled
+                && optionsHoldTimer.seconds() >= OPTIONS_LONG_PRESS_SECONDS) {
+            optionsLongPressHandled = true; // One toggle per hold, never repeated.
+            optionsLongPressed = true;
+        }
+        if (!gamepad1.start && wasOptionsPressed && optionsPressPending) {
+            optionsPressed = !optionsLongPressHandled;
+            optionsPressPending = false;
+        }
+        if (sharePressed || optionsPressed || optionsLongPressed) {
+            int side = sharePressed ? 0 : 1;
+            if (gamepad1.back && gamepad1.start) {
+                armMessage = "Press ONE setup button: Share LEFT, Options RIGHT.";
+            } else if (!setupControlsReleased || ((optionsPressed || optionsLongPressed) && !optionsPressValid)) {
+                armMessage = "Center drive sticks, release arm controls, then make a fresh setup press.";
+            } else if (!driveSticksCentered()) {
+                armMessage = "Center drive sticks before entering or leaving servo setup.";
+            } else if (optionsLongPressed) {
+                if (!synchronizedCalibrationSelected) {
+                    if (calibrationMode) {
+                        armMessage = "Save this individual calibration before switching to SYNC.";
+                    } else if (!calibrationLoaded) {
+                        armMessage = "Save BOTH individual servo calibrations before entering SYNC.";
+                    } else {
+                        synchronizedCalibrationSelected = true;
+                        beginSynchronizedCalibration();
+                        toggledCalibration = true;
+                    }
+                } else if (!calibrationMode || finishSynchronizedCalibration()) {
+                    // Leaving active SYNC saves valid edits first. A rejected or
+                    // failed save stays in SYNC, preserving the working setup.
+                    synchronizedCalibrationSelected = false;
+                    armMessage = "INDIVIDUAL setup selected: Share LEFT; tap Options RIGHT.";
+                    toggledCalibration = true;
+                }
+            } else if (synchronizedCalibrationSelected) {
+                if (sharePressed) {
+                    armMessage = "SYNC selected: tap Options for setup; hold Options to return to INDIVIDUAL.";
+                } else if (!calibrationMode) {
+                    beginSynchronizedCalibration();
                     toggledCalibration = true;
                 } else {
-                    armMessage = "Save failed; still in calibration. Press Options to retry.";
+                    toggledCalibration = finishSynchronizedCalibration();
+                }
+            } else if (calibrationMode && side != calibrationServo) {
+                armMessage = "Finish " + servoNames[calibrationServo]
+                        + " setup with its own button before selecting the other servo.";
+            } else if (!calibrationMode) {
+                beginServoCalibration(side);
+                toggledCalibration = true;
+            } else if (!lowerLimitSet || !upperLimitSet
+                    || !validServoCalibration(calibrationLower, calibrationUpper)
+                    || !unitPosition(calibrationPosition)
+                    || calibrationPosition < Math.min(calibrationLower, calibrationUpper)
+                    || calibrationPosition > Math.max(calibrationLower, calibrationUpper)) {
+                armMessage = "Teach BOTH physical endpoints (span at least 0.01); park BETWEEN them.";
+            } else {
+                // Derive the shared parking fraction from this servo's present
+                // command, preserving its pose instead of jumping to a midpoint.
+                double parkingProgress = (calibrationPosition - calibrationLower)
+                        / (calibrationUpper - calibrationLower);
+                if (saveArmCalibration(parkingProgress)) {
+                    servoLowerLimits[side] = calibrationLower;
+                    servoUpperLimits[side] = calibrationUpper;
+                    servoCalibrated[side] = true;
+                    armStartupPosition = parkingProgress;
+                    armPosition = parkingProgress;
+                    calibrationLoaded = servoCalibrated[0] && servoCalibrated[1];
+                    calibrationMode = false;
+                    calibrationServo = -1;
+                    for (int i = 0; i < armPresets.length; i++) armPresets[i] = Double.NaN;
+                    presetMessage = "Servo calibration saved: all presets cleared.";
+                    armMessage = servoNames[side] + " saved. " + (calibrationLoaded
+                            ? "BOTH ready: normal controls use both mappings."
+                            : "Teach the other servo before normal arm movement.");
+                    toggledCalibration = true;
+                } else {
+                    armMessage = "Save failed; still in " + servoNames[side]
+                            + " setup. Press its setup button to retry.";
                 }
             }
         }
+        wasSharePressed = gamepad1.back;
         wasOptionsPressed = gamepad1.start;
 
-        // Calibration permits manual travel through the servo's command range so
-        // existing limits can be extended. Verify mechanical clearance as you move.
-        // L2/R2 are disabled during calibration and before a valid calibration exists.
-        boolean armEnabled = calibrationMode || calibrationLoaded;
-        if (armEnabled && !toggledCalibration && !gamepad1.a && !gamepad1.x) {
-            if (!calibrationMode && l2Pressed && !r2Pressed) {
-                armPosition = armLowerLimit; // Direct endpoint: no D-pad speed limit.
-            } else if (!calibrationMode && r2Pressed && !l2Pressed) {
-                armPosition = armUpperLimit;
-            } else if (!l2Pressed && !r2Pressed) {
-                double direction = 0.0;
-                if (gamepad1.dpad_up && !gamepad1.dpad_down) direction = 1.0;
-                else if (gamepad1.dpad_down && !gamepad1.dpad_up) direction = -1.0;
-                // Increasing the target must raise the arm. If opposite, reverse
-                // BOTH servo directions in init(), then recalibrate.
-                armPosition += direction * ARM_RATE_PER_SECOND * seconds;
+        double direction = 0.0;
+        if (gamepad1.dpad_up && !gamepad1.dpad_down) direction = 1.0;
+        else if (gamepad1.dpad_down && !gamepad1.dpad_up) direction = -1.0;
+        if (!toggledCalibration && !optionsPressPending && !gamepad1.a && !gamepad1.x) {
+            if (calibrationMode && !l2Pressed && !r2Pressed && direction != 0.0) {
+                if (synchronizedCalibrationSelected) {
+                    double[] bounds = synchronizedProgressBounds();
+                    calibrationPosition = Range.clip(calibrationPosition
+                            + direction * ARM_RATE_PER_SECOND * seconds, bounds[0], bounds[1]);
+                    applyArmProgressToBothServos(calibrationPosition);
+                } else {
+                    // Individual setup adjusts ONLY the selected servo. The other
+                    // linkage must be disconnected before isolated movement.
+                    calibrationPosition = Range.clip(calibrationPosition
+                            + direction * ARM_RATE_PER_SECOND * seconds, 0.0, 1.0);
+                    selectedCalibrationServo().setPosition(calibrationPosition);
+                }
+            } else if (!calibrationMode && calibrationLoaded) {
+                if (l2Pressed && !r2Pressed) armPosition = 0.0;
+                else if (r2Pressed && !l2Pressed) armPosition = 1.0;
+                else if (!l2Pressed && !r2Pressed) armPosition += direction * ARM_RATE_PER_SECOND * seconds;
             }
         }
-        armPosition = Range.clip(armPosition, calibrationMode ? 0.0 : armLowerLimit,
-                calibrationMode ? 1.0 : armUpperLimit);
+        armPosition = Range.clip(armPosition, 0.0, 1.0);
 
         boolean crossPressed = gamepad1.a && !wasCrossPressed;
         boolean squarePressed = gamepad1.x && !wasSquarePressed;
         if (crossPressed || squarePressed) {
             if (!calibrationMode) {
-                armMessage = "Limits locked. Press Options to enter calibration.";
-            } else if (!movementReleased || (gamepad1.a && gamepad1.x)) {
-                armMessage = "Release D-pad/L2/R2, then press ONE save button again.";
+                armMessage = "Limits locked. Share enters LEFT setup; Options enters RIGHT setup.";
+            } else if (!movementReleased || optionsPressPending || (gamepad1.a && gamepad1.x)) {
+                armMessage = "Release movement/setup controls, then press ONE endpoint button again.";
             } else if (crossPressed) {
-                armLowerLimit = armPosition;
+                calibrationLower = calibrationPosition;
                 lowerLimitSet = true;
-                armMessage = "Minimum selected. Set maximum, choose parking target; Options saves.";
+                armMessage = "LOWERED pose selected. Teach raised pose; same setup button saves.";
             } else {
-                armUpperLimit = armPosition;
+                calibrationUpper = calibrationPosition;
                 upperLimitSet = true;
-                armMessage = "Maximum selected. Choose parking target; Options saves.";
+                armMessage = "RAISED pose selected. Park between endpoints; same setup button saves.";
             }
         }
         wasCrossPressed = gamepad1.a;
         wasSquarePressed = gamepad1.x;
         updateArmPresets(movementReleased);
-        if (armEnabled) applyArmPositionToBothServos();
+        // No paired command on a mode-transition loop or until both sides are ready.
+        if (!calibrationMode && calibrationLoaded && !toggledCalibration && !optionsPressPending) {
+            applyArmPositionToBothServos();
+        }
     }
 
     private boolean[] presetButtons() {
@@ -495,16 +732,17 @@ public class FinalRebuilds extends OpMode {
     }
 
     private void loadArmPresets() {
-        // Require the same limits used when these targets were taught. Older
-        // OpModes that alter limits also cannot accidentally revive old presets.
-        // Compare after float conversion to match Android's stored precision.
-        boolean sameLimits = calibrationLoaded
-                && armSettings.getFloat("presetLimitsLower", Float.NaN) == (float) armLowerLimit
-                && armSettings.getFloat("presetLimitsUpper", Float.NaN) == (float) armUpperLimit;
-        if (!sameLimits) return;
+        // A progress preset is valid only for BOTH endpoint mappings it was taught
+        // with. Compare as floats to match Android's saved precision.
+        Map<String, ?> saved = armSettings.getAll();
+        if (!calibrationLoaded
+                || readArmFloat(saved, "presetLeftLower") != (float) servoLowerLimits[0]
+                || readArmFloat(saved, "presetLeftUpper") != (float) servoUpperLimits[0]
+                || readArmFloat(saved, "presetRightLower") != (float) servoLowerLimits[1]
+                || readArmFloat(saved, "presetRightUpper") != (float) servoUpperLimits[1]) return;
         for (int i = 0; i < armPresets.length; i++) {
-            double target = armSettings.getFloat(presetKeys[i], Float.NaN);
-            if (target >= armLowerLimit && target <= armUpperLimit) armPresets[i] = target;
+            double target = readArmFloat(saved, presetKeys[i]);
+            if (unitPosition(target)) armPresets[i] = target;
         }
     }
 
@@ -517,16 +755,15 @@ public class FinalRebuilds extends OpMode {
                 // Existing manual controls take priority. Only one shortcut at
                 // a time; never recall or teach while changing arm calibration.
                 if (held != 1 || !movementReleased || gamepad1.a || gamepad1.x
-                        || gamepad1.start || calibrationMode) {
+                        || gamepad1.back || gamepad1.start || calibrationMode) {
                     presetMessage = "Release arm controls; use ONE preset button outside calibration.";
                 } else if (!calibrationLoaded) {
-                    presetMessage = "Presets inactive until arm limits are calibrated.";
-                } else if (gamepad1.back && (Math.abs(gamepad1.left_stick_x) > STICK_DEADBAND
-                        || Math.abs(gamepad1.left_stick_y) > STICK_DEADBAND
-                        || Math.abs(gamepad1.right_stick_x) > STICK_DEADBAND)) {
+                    presetMessage = "Presets inactive until BOTH servos are calibrated.";
+                } else if (gamepad1.right_stick_button && !driveSticksCentered()) {
                     presetMessage = "Center drive sticks before teaching a preset.";
-                } else if (gamepad1.back) { // PlayStation Share is FTC's back button.
-                    // Hold Share + shortcut to teach the CURRENT target. Wait
+                } else if (gamepad1.right_stick_button) {
+                    // Share now selects LEFT calibration. Hold R3 + shortcut to
+                    // teach the CURRENT shared progress instead. Wait
                     // for the mechanism to settle first; no sensor measures it.
                     SharedPreferences.Editor editor = armSettings.edit();
                     // Write the entire validated in-memory set. This also removes
@@ -534,12 +771,14 @@ public class FinalRebuilds extends OpMode {
                     for (int j = 0; j < armPresets.length; j++) {
                         editor.putFloat(presetKeys[j], (float) (j == i ? armPosition : armPresets[j]));
                     }
-                    editor.putFloat("presetLimitsLower", (float) armLowerLimit)
-                            .putFloat("presetLimitsUpper", (float) armUpperLimit);
+                    editor.putFloat("presetLeftLower", (float) servoLowerLimits[0])
+                            .putFloat("presetLeftUpper", (float) servoUpperLimits[0])
+                            .putFloat("presetRightLower", (float) servoLowerLimits[1])
+                            .putFloat("presetRightUpper", (float) servoUpperLimits[1]);
                     boolean saved = commitArmSettings(editor);
                     if (saved) {
                         armPresets[i] = armPosition;
-                        presetMessage = presetNames[i] + " target saved. Release Share to recall.";
+                        presetMessage = presetNames[i] + " target saved. Release R3 to recall.";
                     } else {
                         presetMessage = "Preset save failed; previous target kept. Release and retry.";
                     }
@@ -548,7 +787,7 @@ public class FinalRebuilds extends OpMode {
                     // the front mechanism is fitted and taught.
                     presetMessage = presetNames[i] + " is UNSET; arm target unchanged.";
                 } else {
-                    armPosition = Range.clip(armPresets[i], armLowerLimit, armUpperLimit);
+                    armPosition = Range.clip(armPresets[i], 0.0, 1.0);
                     presetMessage = presetNames[i] + " target commanded to BOTH servos.";
                 }
             }
@@ -561,20 +800,31 @@ public class FinalRebuilds extends OpMode {
         // acknowledgments, or restrictions are introduced by this display.
         int taught = 0;
         for (double target : armPresets) if (!Double.isNaN(target)) taught++;
-        telemetry.addData("Startup status", "IMU: %s | arm limits: %s | presets: %d/3 (optional)",
+        telemetry.addData("Startup status", "IMU: %s | left: %s | right: %s | presets: %d/3 (optional)",
                 imuAvailable ? "initialized" : "robot-centric fallback",
-                calibrationLoaded ? "saved" : "not saved", taught);
+                servoCalibrated[0] ? "saved" : "not saved",
+                servoCalibrated[1] ? "saved" : "not saved", taught);
     }
 
     private void showCalibrationIndicator() {
         // Read the SAME flag that stops the chassis and enables endpoint buttons.
         // This appears first during INIT and PLAY, including a failed save/exit.
         telemetry.addData("*** ARM CALIBRATION ***", calibrationMode
-                ? "ON - CHASSIS STOPPED"
-                : (calibrationLoaded ? "OFF - NORMAL OPERATION" : "OFF - SETUP REQUIRED"));
+                ? (synchronizedCalibrationSelected ? "ON - SYNC BOTH - CHASSIS STOPPED"
+                        : "ON - " + servoNames[calibrationServo] + " ONLY - CHASSIS STOPPED")
+                : (calibrationLoaded ? "OFF - BOTH SERVOS READY" : "OFF - BOTH CALIBRATIONS REQUIRED"));
+        telemetry.addData("Calibration style", synchronizedCalibrationSelected ? "SYNCHRONIZED" : "INDIVIDUAL");
         telemetry.addData("Calibration controls", calibrationMode
-                ? "D-pad: move | Cross: min | Square: max | Options: save/exit"
-                : "Press Options after PLAY to enter calibration");
+                ? (synchronizedCalibrationSelected
+                        ? "D-pad: BOTH | Cross: min | Square: max | tap Options: save | hold Options 1s: individual"
+                        : "D-pad: selected servo | Cross: lowered | Square: raised | "
+                                + (calibrationServo == 0 ? "Share" : "tap Options") + ": save/exit")
+                : (synchronizedCalibrationSelected ? "Tap Options: SYNC setup | hold Options 1s: individual"
+                        : "Share: LEFT | tap Options: RIGHT | hold Options 1s: SYNC"));
+        if (calibrationMode && !synchronizedCalibrationSelected) {
+            telemetry.addLine("Support arm; disconnect OTHER servo linkage before individual movement.");
+        }
+        if (optionsPressPending) telemetry.addData("Options hold (seconds)", "%.1f", optionsHoldTimer.seconds());
     }
 
     private void showDriveControlsTelemetry() {
@@ -594,15 +844,33 @@ public class FinalRebuilds extends OpMode {
     }
 
     private void showArmTelemetry() {
-        telemetry.addData("Code", "FinalRebuilds - optional presets");
+        telemetry.addData("Code", "FinalRebuilds - individual + synchronized calibration");
         showDriveControlsTelemetry();
-        telemetry.addData("Arm mode", calibrationMode ? "CALIBRATION - drive stopped"
-                : (calibrationLoaded ? "Normal - limits locked" : "Needs calibration - arm commands disabled"));
-        telemetry.addLine("Options: calibration; Cross: minimum; Square: maximum.");
+        telemetry.addData("Arm mode", calibrationMode
+                ? (synchronizedCalibrationSelected ? "SYNC BOTH CALIBRATION - drive stopped"
+                        : servoNames[calibrationServo] + " CALIBRATION - drive stopped")
+                : (calibrationLoaded ? "Normal - paired mappings" : "Needs BOTH calibrations - arm commands disabled"));
+        telemetry.addLine("Individual: Share LEFT / tap Options RIGHT. Hold Options 1s: switch setup style.");
         telemetry.addLine("Normal: L2 minimum / R2 maximum; D-pad adjusts; release holds.");
-        telemetry.addData("Arm COMMAND target", "%.3f", armPosition);
-        telemetry.addData("Minimum / maximum", "%.3f / %.3f", armLowerLimit, armUpperLimit);
-        telemetry.addData("Saved startup target", "%.3f", armStartupPosition);
+        telemetry.addData("Arm COMMAND progress (%)", "%.1f", armPosition * 100.0);
+        telemetry.addData("Saved parking progress (%)", "%.1f", armStartupPosition * 100.0);
+        for (int i = 0; i < servoCalibrated.length; i++) {
+            telemetry.addData(servoNames[i] + " calibration", servoCalibrated[i] ? "SAVED" : "NOT SET");
+            telemetry.addData(servoNames[i] + " saved lowered / raised commands", "%.3f / %.3f",
+                    servoLowerLimits[i], servoUpperLimits[i]);
+        }
+        if (calibrationMode) {
+            if (synchronizedCalibrationSelected) {
+                telemetry.addData("SYNC reference progress (%)", "%.1f", calibrationPosition * 100.0);
+                telemetry.addData("Working common min / max (%)", "%.1f / %.1f",
+                        calibrationLower * 100.0, calibrationUpper * 100.0);
+            } else {
+                telemetry.addData("Selected servo COMMAND", "%.3f", calibrationPosition);
+                telemetry.addData("Working lowered / raised commands", "%s / %s",
+                        lowerLimitSet ? String.format(java.util.Locale.US, "%.3f", calibrationLower) : "UNSET",
+                        upperLimitSet ? String.format(java.util.Locale.US, "%.3f", calibrationUpper) : "UNSET");
+            }
+        }
         telemetry.addData("Arm status", armMessage);
         if (!settingsMessage.isEmpty()) telemetry.addData("Settings storage", settingsMessage);
         telemetry.addData("Presets pickup / carry / place", "%s / %s / %s",
@@ -612,6 +880,8 @@ public class FinalRebuilds extends OpMode {
                 gamepad1.dpad_up, gamepad1.dpad_down, gamepad1.a, gamepad1.x);
         telemetry.addData("Controller 1 L2 / R2", "%.2f / %.2f",
                 gamepad1.left_trigger, gamepad1.right_trigger);
+        telemetry.addData("Controller 1 Share / Options / R3", "%b / %b / %b",
+                gamepad1.back, gamepad1.start, gamepad1.right_stick_button);
         // getPosition() reports the last target, not shaft feedback.
         telemetry.addData("Servo COMMANDS left / right", "%.3f / %.3f",
                 servoMotorLeft.getPosition(), servoMotorRight.getPosition());
@@ -622,11 +892,26 @@ public class FinalRebuilds extends OpMode {
     }
 
     private void applyArmPositionToBothServos() {
-        // Every arm button controls ONE target. The right direction is REVERSE,
-        // so both receive the SAME logical target; do not also use 1 - target.
+        applyArmProgressToBothServos(armPosition);
+    }
+
+    private double mappedServoCommand(int side, double progress) {
+        // Callers constrain ONE shared progress value first. Clipping here only
+        // removes floating-point roundoff at a computed 0/1 command boundary.
+        return Range.clip(servoLowerLimits[side]
+                + progress * (servoUpperLimits[side] - servoLowerLimits[side]), 0.0, 1.0);
+    }
+
+    private void applyArmProgressToBothServos(double progress) {
+        // Example: progress 0.5 commands each servo halfway between its OWN
+        // taught lowered and raised poses. Different commands can therefore mean
+        // the SAME arm pose. Teach both sides at identical physical endpoint poses.
+        // The right direction remains REVERSE: do not also use 1 - target here.
         // Commands are consecutive, not guaranteed physical synchronization.
-        servoMotorLeft.setPosition(armPosition);
-        servoMotorRight.setPosition(armPosition);
+        double leftTarget = mappedServoCommand(0, progress);
+        double rightTarget = mappedServoCommand(1, progress);
+        servoMotorLeft.setPosition(leftTarget);
+        servoMotorRight.setPosition(rightTarget);
     }
 
     @Override

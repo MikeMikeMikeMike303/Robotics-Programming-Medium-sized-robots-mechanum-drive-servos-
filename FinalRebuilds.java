@@ -375,7 +375,7 @@ public class FinalRebuilds extends OpMode {
         // Old shared-command limits cannot safely represent two independent sides.
         // Use separate storage; this version requires each side to be taught once.
         armSettings = hardwareMap.appContext.getSharedPreferences(
-                "FinalRebuilds.arm.independent.v1", Context.MODE_PRIVATE);
+                "Rebuildv6.arm.independent.v1", Context.MODE_PRIVATE);
         Map<String, ?> saved = armSettings.getAll();
         for (int i = 0; i < servoCalibrated.length; i++) {
             String side = i == 0 ? "left" : "right";

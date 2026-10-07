@@ -213,16 +213,16 @@ public class FinalRebuilds extends OpMode {
         resetHeading();
         // Start timing at PLAY so time spent waiting in INIT cannot cause a jump.
         armTimer.reset();
-        wasCrossPressed = gamepad1.a;
-        wasSquarePressed = gamepad1.x;
+        wasCrossPressed = gamepad1.dpad_down;
+        wasSquarePressed = gamepad1.dpad_left;
         wasSharePressed = gamepad1.back;
         wasOptionsPressed = gamepad1.start;
         optionsPressPending = false;
         optionsLongPressHandled = gamepad1.start; // Ignore a button already held at PLAY.
         optionsPressValid = false;
         optionsHoldTimer.reset();
-        wasTrianglePressed = gamepad1.y;
-        wasCirclePressed = gamepad1.b;
+        wasTrianglePressed = gamepad1.dpad_up;
+        wasCirclePressed = gamepad1.dpad_right;
         boolean[] presetButtons = presetButtons();
         for (int i = 0; i < wasPresetPressed.length; i++) {
             wasPresetPressed[i] = presetButtons[i];
@@ -242,16 +242,16 @@ public class FinalRebuilds extends OpMode {
     @Override
     public void loop() {
         // A new press toggles or resets ONCE; holding the button does not repeat.
-        if (gamepad1.y && !wasTrianglePressed) {
-            resetHeading(); // Face field-forward before pressing Triangle.
-        }
-        if (gamepad1.b && !wasCirclePressed) {
-            fieldCentric = !fieldCentric;
-            driveModeChanges++;
-            holdHeadingActive = false;
-        }
-        wasTrianglePressed = gamepad1.y;
-        wasCirclePressed = gamepad1.b;
+        if (gamepad1.dpad_up && !wasTrianglePressed) {
+    resetHeading();
+}
+if (gamepad1.dpad_right && !wasCirclePressed) {
+    fieldCentric = !fieldCentric;
+    driveModeChanges++;
+    holdHeadingActive = false;
+}
+wasTrianglePressed = gamepad1.dpad_up;
+wasCirclePressed = gamepad1.dpad_right;
         updateArm(); // Calibration mode is also used to stop the chassis below.
         showCalibrationIndicator(); // Display the mode AFTER processing setup buttons.
 
@@ -605,8 +605,9 @@ public class FinalRebuilds extends OpMode {
                 && !l2Pressed && !r2Pressed;
         boolean toggledCalibration = false;
 
-        boolean setupControlsReleased = movementReleased && !gamepad1.a && !gamepad1.x
-                && !anyPresetButton() && !gamepad1.right_stick_button;
+        boolean setupControlsReleased = movementReleased
+        && !gamepad1.dpad_down && !gamepad1.dpad_left
+        && !anyPresetButton() && !gamepad1.right_stick_button;
         boolean sharePressed = gamepad1.back && !wasSharePressed;
         boolean optionsPressed = false;
         boolean optionsLongPressed = false;
@@ -709,7 +710,8 @@ public class FinalRebuilds extends OpMode {
         double direction = 0.0;
         if (gamepad1.y && !gamepad1.a) direction = 1.0;
         else if (gamepad1.a && !gamepad1.y) direction = -1.0;
-        if (!toggledCalibration && !optionsPressPending && !gamepad1.a && !gamepad1.x) {
+        if (!toggledCalibration && !optionsPressPending
+        && !gamepad1.dpad_down && !gamepad1.dpad_left) {
             if (calibrationMode && !l2Pressed && !r2Pressed && direction != 0.0) {
                 if (synchronizedCalibrationSelected) {
                     double[] bounds = synchronizedProgressBounds();
@@ -731,12 +733,13 @@ public class FinalRebuilds extends OpMode {
         }
         armPosition = Range.clip(armPosition, 0.0, 1.0);
 
-        boolean crossPressed = gamepad1.a && !wasCrossPressed;
-        boolean squarePressed = gamepad1.x && !wasSquarePressed;
+        boolean crossPressed = gamepad1.dpad_down && !wasCrossPressed;
+boolean squarePressed = gamepad1.dpad_left && !wasSquarePressed;
         if (crossPressed || squarePressed) {
             if (!calibrationMode) {
                 armMessage = "Limits locked. Share enters LEFT setup; Options enters RIGHT setup.";
-            } else if (!movementReleased || optionsPressPending || (gamepad1.a && gamepad1.x)) {
+            } else if (!movementReleased || optionsPressPending
+        || (gamepad1.dpad_down && gamepad1.dpad_left)) {
                 armMessage = "Release movement/setup controls, then press ONE endpoint button again.";
             } else if (crossPressed) {
                 calibrationLower = calibrationPosition;
@@ -748,13 +751,19 @@ public class FinalRebuilds extends OpMode {
                 armMessage = "RAISED pose selected. Park between endpoints; same setup button saves.";
             }
         }
-        wasCrossPressed = gamepad1.a;
-        wasSquarePressed = gamepad1.x;
+        wasCrossPressed = gamepad1.dpad_down;
+        wasSquarePressed = gamepad1.dpad_left;
         updateArmPresets(movementReleased);
         // No paired command on a mode-transition loop or until both sides are ready.
         if (!calibrationMode && calibrationLoaded && !toggledCalibration && !optionsPressPending) {
             applyArmPositionToBothServos();
         }
+
+        if (held != 1 || !movementReleased
+        || gamepad1.dpad_down || gamepad1.dpad_left
+        || gamepad1.back || gamepad1.start || calibrationMode) {
+    presetMessage = "Release arm controls; use ONE preset button outside calibration.";
+}
     }
 
     private boolean[] presetButtons() {

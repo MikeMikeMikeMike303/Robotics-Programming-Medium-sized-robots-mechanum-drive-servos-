@@ -4,6 +4,8 @@ import android.content.Context;
 import android.content.SharedPreferences;
 // Describes how the REV Hub is physically mounted on the robot.
 import com.qualcomm.hardware.rev.RevHubOrientationOnRobot;
+// REV Hubs have built-in current sensing; no extra sensor is required.
+import com.qualcomm.hardware.lynx.LynxModule;
 import com.qualcomm.robotcore.hardware.Servo;
 import com.qualcomm.robotcore.util.ElapsedTime;
 import com.qualcomm.robotcore.util.Range;
@@ -15,6 +17,7 @@ import com.qualcomm.robotcore.hardware.DcMotorSimple;
 import com.qualcomm.robotcore.hardware.IMU;
 // Lets us request angles in radians for Java's sine and cosine functions.
 import org.firstinspires.ftc.robotcore.external.navigation.AngleUnit;
+import org.firstinspires.ftc.robotcore.external.navigation.CurrentUnit;
 import java.util.Map;
 
 /**
@@ -43,6 +46,8 @@ public class FinalRebuilds extends OpMode {
     private static final double PRECISION_POWER = 0.35;
     private static final double HEADING_GAIN = 1.0; // Turn command per radian of error.
     private static final double MAX_HEADING_CORRECTION = 0.25;
+    // Ignore tiny heading errors while translating. This does not limit manual turns.
+    private static final double HEADING_TOLERANCE_RADIANS = Math.toRadians(1.0);
     // This preserves your original motor/joystick signs. Change to -1 ONLY if
     // heading hold turns farther away from its target during a wheels-raised test.
     private static final double HEADING_CORRECTION_SIGN = 1.0;
@@ -59,11 +64,20 @@ public class FinalRebuilds extends OpMode {
     private double headingCorrection;
     private String imuMessage = "";
 
+    // Read Hub current only twice per second, then reuse the readings for telemetry.
+    // These measure whole Hubs, not individual servos or every battery-powered device.
+    private static final double HUB_CURRENT_INTERVAL_SECONDS = 0.5;
+    private LynxModule[] currentHubs = new LynxModule[0];
+    private double[] hubCurrentAmps = new double[0];
+    private final ElapsedTime hubCurrentTimer = new ElapsedTime();
+    private boolean hubCurrentSampled;
+    private String hubCurrentMessage = "Unavailable - no REV Hubs found";
+
     // Normal driving uses ONE arm progress value: 0 = lowered, 1 = raised.
     // Each servo maps that progress through its OWN taught endpoint commands.
     // These are commands, not measured angles or guaranteed physical synchronization.
     private static final double ARM_START = 0.50;
-    private static final double ARM_RATE_PER_SECOND = 0.10; // D-pad only.
+    private static final double ARM_RATE_PER_SECOND = 0.50; // D-pad only. This sets the speed for the D-pad control of the servos
     private static final double MIN_CALIBRATED_SPAN = 0.01;
     private double armPosition = ARM_START;
     private double armStartupPosition = ARM_START;
@@ -136,6 +150,19 @@ public class FinalRebuilds extends OpMode {
                     : DcMotor.RunMode.RUN_WITHOUT_ENCODER);
             motor.setPower(0.0);
         }
+
+        // Find configured Hubs automatically. Current monitoring is informational;
+        // discovery or read failures must not disable driving or arm controls.
+        try {
+            currentHubs = hardwareMap.getAll(LynxModule.class).toArray(new LynxModule[0]);
+            hubCurrentAmps = new double[currentHubs.length];
+        } catch (RuntimeException error) {
+            currentHubs = new LynxModule[0];
+            hubCurrentAmps = new double[0];
+            hubCurrentMessage = "Unavailable - Hub discovery failed";
+        }
+        hubCurrentSampled = false;
+        hubCurrentTimer.reset();
 
         // Match these directions to the actual Hub mounting.
         // If IMU setup fails, robot-centric driving remains available.
@@ -249,8 +276,12 @@ public class FinalRebuilds extends OpMode {
             }
             // Wrapping avoids a full-circle correction when yaw crosses +/-180°.
             double error = wrapRadians(holdHeading - heading);
-            headingCorrection = Range.clip(HEADING_CORRECTION_SIGN * HEADING_GAIN * error,
-                    -MAX_HEADING_CORRECTION, MAX_HEADING_CORRECTION);
+            // Keep the original held heading so small drift can accumulate and
+            // be corrected once it exceeds 1 degree. Inside that band, request no turn.
+            if (Math.abs(error) > HEADING_TOLERANCE_RADIANS) {
+                headingCorrection = Range.clip(HEADING_CORRECTION_SIGN * HEADING_GAIN * error,
+                        -MAX_HEADING_CORRECTION, MAX_HEADING_CORRECTION);
+            }
             right_x = headingCorrection;
         } else {
             holdHeadingActive = false;
@@ -827,6 +858,42 @@ public class FinalRebuilds extends OpMode {
         if (optionsPressPending) telemetry.addData("Options hold (seconds)", "%.1f", optionsHoldTimer.seconds());
     }
 
+    private void showHubCurrentTelemetry() {
+        if (currentHubs.length == 0) {
+            telemetry.addData("Hub current (A)", hubCurrentMessage);
+            return;
+        }
+        if (!hubCurrentSampled || hubCurrentTimer.seconds() >= HUB_CURRENT_INTERVAL_SECONDS) {
+            hubCurrentSampled = true;
+            hubCurrentTimer.reset();
+            for (int i = 0; i < currentHubs.length; i++) {
+                try {
+                    double amps = currentHubs[i].getCurrent(CurrentUnit.AMPS);
+                    // Reject invalid readings; never reuse an old value after a failure.
+                    hubCurrentAmps[i] = !Double.isNaN(amps) && !Double.isInfinite(amps)
+                            && amps >= 0.0 ? amps : Double.NaN;
+                } catch (RuntimeException error) {
+                    hubCurrentAmps[i] = Double.NaN;
+                }
+            }
+        }
+        double total = 0.0;
+        boolean allAvailable = true;
+        for (int i = 0; i < currentHubs.length; i++) {
+            String label = "Hub " + (i + 1) + " current (A)";
+            if (Double.isNaN(hubCurrentAmps[i])) {
+                telemetry.addData(label, "Unavailable");
+                allAvailable = false;
+            } else {
+                telemetry.addData(label, "%.2f", hubCurrentAmps[i]);
+                total += hubCurrentAmps[i];
+            }
+        }
+        // A partial sum could look misleadingly low. Show a total only when all read.
+        if (allAvailable) telemetry.addData("Hub current sum (A)", "%.2f", total);
+        else telemetry.addData("Hub current sum (A)", "Unavailable - incomplete readings");
+    }
+
     private void showDriveControlsTelemetry() {
         // Watch these while pressing buttons. Input on controller 2 does not
         // control this OpMode; assign the driving controller as controller 1.
@@ -837,6 +904,9 @@ public class FinalRebuilds extends OpMode {
         telemetry.addData("Precision button held", gamepad1.left_bumper || gamepad1.right_bumper);
         telemetry.addData("Selected drive mode", fieldCentric ? "Field-centric" : "Robot-centric");
         telemetry.addData("Circle switches detected", driveModeChanges);
+        telemetry.addData("Heading hold tolerance (degrees)", "%.1f",
+                Math.toDegrees(HEADING_TOLERANCE_RADIANS));
+        showHubCurrentTelemetry(); // Also called during INIT through arm telemetry.
         // These are electrical power commands, not measured wheel speed.
         telemetry.addData("Drive powers FL/BL/FR/BR", "%.2f / %.2f / %.2f / %.2f",
                 frontLeftMotor.getPower(), backLeftMotor.getPower(),

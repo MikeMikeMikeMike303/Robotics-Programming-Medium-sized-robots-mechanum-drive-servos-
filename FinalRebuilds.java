@@ -12,7 +12,6 @@ import com.qualcomm.robotcore.util.Range;
 import com.qualcomm.robotcore.eventloop.opmode.OpMode;
 import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
 import com.qualcomm.robotcore.hardware.DcMotor;
-import com.qualcomm.robotcore.hardware.Gamepad;
 import com.qualcomm.robotcore.hardware.DcMotorSimple;
 // Gives access to the Hub's orientation sensor (Inertial Measurement Unit).
 import com.qualcomm.robotcore.hardware.IMU;
@@ -57,6 +56,8 @@ public class FinalRebuilds extends OpMode {
     private static final boolean USE_DRIVE_ENCODERS = false;
     private boolean fieldCentric = true;
     private boolean imuAvailable;
+    private boolean wasTrianglePressed;
+    private boolean wasCirclePressed;
     private int driveModeChanges;
     private boolean holdHeadingActive;
     private double holdHeading;
@@ -76,7 +77,7 @@ public class FinalRebuilds extends OpMode {
     // Each servo maps that progress through its OWN taught endpoint commands.
     // These are commands, not measured angles or guaranteed physical synchronization.
     private static final double ARM_START = 0.50;
-    private static final double ARM_RATE_PER_SECOND = 0.10; // D-pad only.
+    private static final double ARM_RATE_PER_SECOND = 0.50; // D-pad only. This sets the speed for the D-pad control of the servos
     private static final double MIN_CALIBRATED_SPAN = 0.01;
     private double armPosition = ARM_START;
     private double armStartupPosition = ARM_START;
@@ -96,6 +97,8 @@ public class FinalRebuilds extends OpMode {
     private double calibrationUpper;
     private boolean lowerLimitSet;
     private boolean upperLimitSet;
+    private boolean wasSharePressed;
+    private boolean wasOptionsPressed;
     // Defer a short Options action until release, so a hold cannot also act as a tap.
     private static final double OPTIONS_LONG_PRESS_SECONDS = 1.0;
     private final ElapsedTime optionsHoldTimer = new ElapsedTime();
@@ -103,6 +106,8 @@ public class FinalRebuilds extends OpMode {
     private boolean optionsLongPressHandled;
     private boolean optionsPressValid;
     // PlayStation Cross = a; Square = x; Triangle = y; Circle = b; Options = start.
+    private boolean wasCrossPressed;
+    private boolean wasSquarePressed;
     private String armMessage = "";
     private SharedPreferences armSettings;
     private String settingsMessage = ""; // Only shown when storage needs attention.
@@ -113,135 +118,8 @@ public class FinalRebuilds extends OpMode {
     private final double[] armPresets = {Double.NaN, Double.NaN, Double.NaN};
     private final String[] presetNames = {"Pickup", "Carry", "Place"};
     private final String[] presetKeys = {"presetPickup", "presetCarry", "presetPlace"};
+    private final boolean[] wasPresetPressed = {false, false, false};
     private String presetMessage = "Presets optional: unset buttons do not move the arm.";
-
-
-    // DUAL-DRIVER TUTORIAL, STEP 1: read both controllers once per robot loop.
-    // Each controller keeps its own button history. A fresh press on Controller 2
-    // still counts while Controller 1 holds the same button; simultaneous presses
-    // are combined into one robot action. Never call loop()/updateArm() twice.
-    private final ControllerInput[] controllers = {new ControllerInput(), new ControllerInput()};
-    private final ControllerInput controls = new ControllerInput();
-    private int driveController; // 0 = Controller 1, 1 = Controller 2.
-    private int calibrationController = -1; // The controller that entered owns setup.
-    private int optionsController = -1; // Latch a whole Options press to ONE controller.
-
-    private static class ControllerInput {
-        double left_stick_x, left_stick_y, right_stick_x, left_trigger, right_trigger;
-        boolean a, b, x, y, back, start, dpad_up, dpad_down, dpad_left, dpad_right;
-        boolean left_stick_button, right_stick_button, left_bumper, right_bumper;
-        boolean crossPressed, squarePressed, trianglePressed, circlePressed;
-        boolean sharePressed, optionsPressed;
-        final boolean[] presetPressed = new boolean[3];
-
-        void read(Gamepad pad) {
-            crossPressed = pad.a && !a;
-            squarePressed = pad.x && !x;
-            trianglePressed = pad.y && !y;
-            circlePressed = pad.b && !b;
-            sharePressed = pad.back && !back;
-            optionsPressed = pad.start && !start;
-            presetPressed[0] = pad.dpad_left && !dpad_left;
-            presetPressed[1] = pad.left_stick_button && !left_stick_button;
-            presetPressed[2] = pad.dpad_right && !dpad_right;
-            left_stick_x = pad.left_stick_x;
-            left_stick_y = pad.left_stick_y;
-            right_stick_x = pad.right_stick_x;
-            left_trigger = pad.left_trigger;
-            right_trigger = pad.right_trigger;
-            a = pad.a; b = pad.b; x = pad.x; y = pad.y;
-            back = pad.back; start = pad.start;
-            dpad_up = pad.dpad_up; dpad_down = pad.dpad_down;
-            dpad_left = pad.dpad_left; dpad_right = pad.dpad_right;
-            left_stick_button = pad.left_stick_button;
-            right_stick_button = pad.right_stick_button;
-            left_bumper = pad.left_bumper; right_bumper = pad.right_bumper;
-        }
-
-        void seed(Gamepad pad) {
-            read(pad);
-            crossPressed = squarePressed = trianglePressed = circlePressed = false;
-            sharePressed = optionsPressed = false;
-            for (int i = 0; i < presetPressed.length; i++) presetPressed[i] = false;
-        }
-
-        boolean presetHeld(int index) {
-            return index == 0 ? dpad_left : (index == 1 ? left_stick_button : dpad_right);
-        }
-    }
-
-    private void readSharedControls() {
-        controllers[0].read(gamepad1);
-        controllers[1].read(gamepad2);
-        ControllerInput one = controllers[0];
-        ControllerInput two = controllers[1];
-        // DUAL-DRIVER TUTORIAL, STEP 2: combine held buttons, not analog drive axes.
-        // Either driver can use precision or a drive toggle. Arm conflicts are
-        // checked separately below, so opposite requests do not fight each other.
-        controls.a = one.a || two.a;
-        controls.x = one.x || two.x;
-        controls.back = one.back || two.back;
-        controls.start = one.start || two.start;
-        controls.dpad_up = one.dpad_up || two.dpad_up;
-        controls.dpad_down = one.dpad_down || two.dpad_down;
-        controls.dpad_left = one.dpad_left || two.dpad_left;
-        controls.dpad_right = one.dpad_right || two.dpad_right;
-        controls.left_stick_button = one.left_stick_button || two.left_stick_button;
-        controls.right_stick_button = one.right_stick_button || two.right_stick_button;
-        controls.left_bumper = one.left_bumper || two.left_bumper;
-        controls.right_bumper = one.right_bumper || two.right_bumper;
-        controls.left_trigger = Math.max(one.left_trigger, two.left_trigger);
-        controls.right_trigger = Math.max(one.right_trigger, two.right_trigger);
-        controls.trianglePressed = one.trianglePressed || two.trianglePressed;
-        controls.circlePressed = one.circlePressed || two.circlePressed;
-        // During calibration, only its owner can teach endpoints. Held buttons
-        // on either controller still take part in existing conflict checks.
-        controls.crossPressed = calibrationController >= 0
-                ? controllers[calibrationController].crossPressed : one.crossPressed || two.crossPressed;
-        controls.squarePressed = calibrationController >= 0
-                ? controllers[calibrationController].squarePressed : one.squarePressed || two.squarePressed;
-
-        // DUAL-DRIVER TUTORIAL, STEP 3: choose ONE complete drive-stick group.
-        // Controller 1 wins when its translation or turn stick is outside .05.
-        // Controller 2 drives when Controller 1 is centered. This allows one
-        // person to drive while the other operates the arm, without adding speeds.
-        int selected = !sticksCentered(one) ? 0 : (!sticksCentered(two) ? 1 : 0);
-        if (selected != driveController) holdHeadingActive = false;
-        driveController = selected;
-    }
-
-    private boolean sticksCentered(ControllerInput input) {
-        return Math.abs(input.left_stick_x) <= STICK_DEADBAND
-                && Math.abs(input.left_stick_y) <= STICK_DEADBAND
-                && Math.abs(input.right_stick_x) <= STICK_DEADBAND;
-    }
-
-    private int armRequest(ControllerInput input) {
-        boolean lower = input.left_trigger > 0.5;
-        boolean raise = input.right_trigger > 0.5;
-        // Preserve trigger precedence over the SAME controller's D-pad.
-        if (lower && raise) return 0;
-        if (lower) return -1;
-        if (raise) return 1;
-        if (input.dpad_up == input.dpad_down) return 0;
-        return input.dpad_up ? 1 : -1;
-    }
-
-    private boolean opposingArmRequests() {
-        return armRequest(controllers[0]) * armRequest(controllers[1]) < 0;
-    }
-
-    private int firstEligiblePress(boolean options) {
-        // A controller cannot take over someone else's calibration session.
-        if (calibrationController >= 0) {
-            ControllerInput owner = controllers[calibrationController];
-            return (options ? owner.optionsPressed : owner.sharePressed) ? calibrationController : -1;
-        }
-        for (int i = 0; i < controllers.length; i++) {
-            if (options ? controllers[i].optionsPressed : controllers[i].sharePressed) return i;
-        }
-        return -1;
-    }
 
 
     @Override
@@ -318,8 +196,7 @@ public class FinalRebuilds extends OpMode {
         // Show a setup reminder on the Driver Station; update() sends it.
         telemetry.addLine("Face field-forward before pressing PLAY.");
         telemetry.addLine("Normal arm: D-pad Up raises; Down lowers; release holds target.");
-        telemetry.addLine("Both controllers: same controls. Controller 1 drive sticks take priority.");
-        telemetry.addLine("Circle: drive mode; L1/R1 on either: precision; Triangle: reset heading.");
+        telemetry.addLine("Circle: drive mode; L1/R1: precision; Triangle: reset heading.");
         telemetry.addLine("Share: LEFT; tap Options: RIGHT; hold Options 1s: SYNC; Cross: min; Square: max.");
         showArmTelemetry();
         telemetry.addData("Left servo connection", servoMotorLeft.getConnectionInfo());
@@ -336,16 +213,20 @@ public class FinalRebuilds extends OpMode {
         resetHeading();
         // Start timing at PLAY so time spent waiting in INIT cannot cause a jump.
         armTimer.reset();
-        // Seed BOTH histories so a button already held at PLAY is not a new press.
-        controllers[0].seed(gamepad1);
-        controllers[1].seed(gamepad2);
-        driveController = 0;
-        calibrationController = -1;
-        optionsController = -1;
+        wasCrossPressed = gamepad1.a;
+        wasSquarePressed = gamepad1.x;
+        wasSharePressed = gamepad1.back;
+        wasOptionsPressed = gamepad1.start;
         optionsPressPending = false;
-        optionsLongPressHandled = false;
+        optionsLongPressHandled = gamepad1.start; // Ignore a button already held at PLAY.
         optionsPressValid = false;
         optionsHoldTimer.reset();
+        wasTrianglePressed = gamepad1.y;
+        wasCirclePressed = gamepad1.b;
+        boolean[] presetButtons = presetButtons();
+        for (int i = 0; i < wasPresetPressed.length; i++) {
+            wasPresetPressed[i] = presetButtons[i];
+        }
     }
 
     @Override
@@ -360,25 +241,25 @@ public class FinalRebuilds extends OpMode {
 
     @Override
     public void loop() {
-        readSharedControls();
-        // Per-controller edges coalesce into one action when both press together.
-        if (controls.trianglePressed) {
+        // A new press toggles or resets ONCE; holding the button does not repeat.
+        if (gamepad1.y && !wasTrianglePressed) {
             resetHeading(); // Face field-forward before pressing Triangle.
         }
-        if (controls.circlePressed) {
+        if (gamepad1.b && !wasCirclePressed) {
             fieldCentric = !fieldCentric;
             driveModeChanges++;
             holdHeadingActive = false;
         }
+        wasTrianglePressed = gamepad1.y;
+        wasCirclePressed = gamepad1.b;
         updateArm(); // Calibration mode is also used to stop the chassis below.
         showCalibrationIndicator(); // Display the mode AFTER processing setup buttons.
 
         // Deadband removes center drift and rescales the rest of the stick range
         // so a full stick STILL commands 1.0. Preserve your original drive signs.
-        ControllerInput driveInput = controllers[driveController];
-        double left_y = applyDeadband(driveInput.left_stick_y);
-        double left_x = -applyDeadband(driveInput.left_stick_x);
-        double right_x = -applyDeadband(driveInput.right_stick_x);
+        double left_y = applyDeadband(gamepad1.left_stick_y);
+        double left_x = -applyDeadband(gamepad1.left_stick_x);
+        double right_x = -applyDeadband(gamepad1.right_stick_x);
         double heading = readHeading();
         boolean headingValid = !Double.isNaN(heading) && !Double.isInfinite(heading);
         boolean translating = left_x != 0.0 || left_y != 0.0;
@@ -417,7 +298,7 @@ public class FinalRebuilds extends OpMode {
         // Full power normally; precision only while L1/R1 is held.
         // Arm calibration stops all drive motors so stick bumps cannot move chassis.
         double driveScale = calibrationMode || optionsPressPending ? 0.0
-                : (controls.left_bumper || controls.right_bumper ? PRECISION_POWER : 1.0);
+                : (gamepad1.left_bumper || gamepad1.right_bumper ? PRECISION_POWER : 1.0);
 
         // Keep motor powers within [-1, 1], preserving their proportions.
         // Combining forward, sideways, and turning commands can exceed 1.
@@ -607,20 +488,20 @@ public class FinalRebuilds extends OpMode {
     }
 
     private boolean driveSticksCentered() {
-        // Setup and preset teaching require BOTH drivers to stop requesting motion.
-        return sticksCentered(controllers[0]) && sticksCentered(controllers[1]);
+        return Math.abs(gamepad1.left_stick_x) <= STICK_DEADBAND
+                && Math.abs(gamepad1.left_stick_y) <= STICK_DEADBAND
+                && Math.abs(gamepad1.right_stick_x) <= STICK_DEADBAND;
     }
 
     private boolean anyPresetButton() {
-        return controls.dpad_left || controls.left_stick_button || controls.dpad_right;
+        return gamepad1.dpad_left || gamepad1.left_stick_button || gamepad1.dpad_right;
     }
 
     private Servo selectedCalibrationServo() {
         return calibrationServo == 0 ? servoMotorLeft : servoMotorRight;
     }
 
-    private void beginServoCalibration(int side, int controller) {
-        calibrationController = controller;
+    private void beginServoCalibration(int side) {
         calibrationServo = side;
         calibrationMode = true;
         calibrationLower = servoLowerLimits[side];
@@ -635,8 +516,7 @@ public class FinalRebuilds extends OpMode {
                 + " D-pad changes this servo; Cross min; Square max; same setup button saves.";
     }
 
-    private void beginSynchronizedCalibration(int controller) {
-        calibrationController = controller;
+    private void beginSynchronizedCalibration() {
         calibrationMode = true;
         calibrationServo = 2;
         // Keep the separate saved servo endpoints as our reference mapping.
@@ -709,7 +589,6 @@ public class FinalRebuilds extends OpMode {
         armStartupPosition = parkingProgress;
         calibrationLoaded = true;
         calibrationMode = false;
-        calibrationController = -1;
         calibrationServo = -1;
         for (int i = 0; i < armPresets.length; i++) armPresets[i] = Double.NaN;
         presetMessage = "Synchronized calibration saved: all presets cleared.";
@@ -720,56 +599,40 @@ public class FinalRebuilds extends OpMode {
     private void updateArm() {
         double seconds = Math.min(armTimer.seconds(), 0.05);
         armTimer.reset();
-        boolean l2Pressed = controls.left_trigger > 0.5;
-        boolean r2Pressed = controls.right_trigger > 0.5;
-        boolean movementReleased = !controls.dpad_up && !controls.dpad_down
+        boolean l2Pressed = gamepad1.left_trigger > 0.5;
+        boolean r2Pressed = gamepad1.right_trigger > 0.5;
+        boolean movementReleased = !gamepad1.dpad_up && !gamepad1.dpad_down
                 && !l2Pressed && !r2Pressed;
         boolean toggledCalibration = false;
 
-        boolean setupControlsReleased = movementReleased && !controls.a && !controls.x
-                && !anyPresetButton() && !controls.right_stick_button;
-        int shareController = firstEligiblePress(false);
-        boolean sharePressed = shareController >= 0;
+        boolean setupControlsReleased = movementReleased && !gamepad1.a && !gamepad1.x
+                && !anyPresetButton() && !gamepad1.right_stick_button;
+        boolean sharePressed = gamepad1.back && !wasSharePressed;
         boolean optionsPressed = false;
         boolean optionsLongPressed = false;
-        int setupController = shareController;
-        // DUAL-DRIVER TUTORIAL, STEP 4: keep a whole Options press on its source.
-        // Another controller cannot prolong this hold or turn its release into
-        // a tap. A second overlapping Options press is ignored until a fresh press.
-        if (!optionsPressPending) {
-            int pressedController = firstEligiblePress(true);
-            if (pressedController >= 0) {
-                optionsController = pressedController;
-                optionsPressPending = true;
-                optionsLongPressHandled = false;
-                optionsPressValid = setupControlsReleased && driveSticksCentered() && !controls.back;
-                optionsHoldTimer.reset();
-            }
+        if (gamepad1.start && !wasOptionsPressed) {
+            optionsPressPending = true;
+            optionsLongPressHandled = false;
+            optionsPressValid = setupControlsReleased && driveSticksCentered() && !gamepad1.back;
+            optionsHoldTimer.reset();
         }
-        boolean ownerOptionsHeld = optionsController >= 0 && controllers[optionsController].start;
-        if (optionsPressPending && (!setupControlsReleased || !driveSticksCentered() || controls.back)) {
+        if (optionsPressPending && (!setupControlsReleased || !driveSticksCentered() || gamepad1.back)) {
             // An invalid hold stays invalid even if the conflicting control is
             // released later. Release Options and make a fresh press to retry.
             optionsPressValid = false;
         }
-        if (ownerOptionsHeld && optionsPressPending && !optionsLongPressHandled
+        if (gamepad1.start && optionsPressPending && !optionsLongPressHandled
                 && optionsHoldTimer.seconds() >= OPTIONS_LONG_PRESS_SECONDS) {
             optionsLongPressHandled = true; // One toggle per hold, never repeated.
             optionsLongPressed = true;
-            setupController = optionsController;
         }
-        if (!ownerOptionsHeld && optionsPressPending) {
+        if (!gamepad1.start && wasOptionsPressed && optionsPressPending) {
             optionsPressed = !optionsLongPressHandled;
-            setupController = optionsController;
             optionsPressPending = false;
-            optionsController = -1;
         }
         if (sharePressed || optionsPressed || optionsLongPressed) {
             int side = sharePressed ? 0 : 1;
-            // Options acts on RELEASE as well as a long hold. Reject conflicting
-            // action events even when Options is no longer physically held.
-            if ((controls.back && controls.start)
-                    || (sharePressed && (optionsPressed || optionsLongPressed))) {
+            if (gamepad1.back && gamepad1.start) {
                 armMessage = "Press ONE setup button: Share LEFT, Options RIGHT.";
             } else if (!setupControlsReleased || ((optionsPressed || optionsLongPressed) && !optionsPressValid)) {
                 armMessage = "Center drive sticks, release arm controls, then make a fresh setup press.";
@@ -783,7 +646,7 @@ public class FinalRebuilds extends OpMode {
                         armMessage = "Save BOTH individual servo calibrations before entering SYNC.";
                     } else {
                         synchronizedCalibrationSelected = true;
-                        beginSynchronizedCalibration(setupController);
+                        beginSynchronizedCalibration();
                         toggledCalibration = true;
                     }
                 } else if (!calibrationMode || finishSynchronizedCalibration()) {
@@ -797,7 +660,7 @@ public class FinalRebuilds extends OpMode {
                 if (sharePressed) {
                     armMessage = "SYNC selected: tap Options for setup; hold Options to return to INDIVIDUAL.";
                 } else if (!calibrationMode) {
-                    beginSynchronizedCalibration(setupController);
+                    beginSynchronizedCalibration();
                     toggledCalibration = true;
                 } else {
                     toggledCalibration = finishSynchronizedCalibration();
@@ -806,7 +669,7 @@ public class FinalRebuilds extends OpMode {
                 armMessage = "Finish " + servoNames[calibrationServo]
                         + " setup with its own button before selecting the other servo.";
             } else if (!calibrationMode) {
-                beginServoCalibration(side, setupController);
+                beginServoCalibration(side);
                 toggledCalibration = true;
             } else if (!lowerLimitSet || !upperLimitSet
                     || !validServoCalibration(calibrationLower, calibrationUpper)
@@ -827,7 +690,6 @@ public class FinalRebuilds extends OpMode {
                     armPosition = parkingProgress;
                     calibrationLoaded = servoCalibrated[0] && servoCalibrated[1];
                     calibrationMode = false;
-                    calibrationController = -1;
                     calibrationServo = -1;
                     for (int i = 0; i < armPresets.length; i++) armPresets[i] = Double.NaN;
                     presetMessage = "Servo calibration saved: all presets cleared.";
@@ -841,12 +703,13 @@ public class FinalRebuilds extends OpMode {
                 }
             }
         }
+        wasSharePressed = gamepad1.back;
+        wasOptionsPressed = gamepad1.start;
 
-        ControllerInput armInput = calibrationController >= 0 ? controllers[calibrationController] : controls;
         double direction = 0.0;
-        if (armInput.dpad_up && !armInput.dpad_down) direction = 1.0;
-        else if (armInput.dpad_down && !armInput.dpad_up) direction = -1.0;
-        if (!toggledCalibration && !optionsPressPending && !controls.a && !controls.x) {
+        if (gamepad1.dpad_up && !gamepad1.dpad_down) direction = 1.0;
+        else if (gamepad1.dpad_down && !gamepad1.dpad_up) direction = -1.0;
+        if (!toggledCalibration && !optionsPressPending && !gamepad1.a && !gamepad1.x) {
             if (calibrationMode && !l2Pressed && !r2Pressed && direction != 0.0) {
                 if (synchronizedCalibrationSelected) {
                     double[] bounds = synchronizedProgressBounds();
@@ -860,7 +723,7 @@ public class FinalRebuilds extends OpMode {
                             + direction * ARM_RATE_PER_SECOND * seconds, 0.0, 1.0);
                     selectedCalibrationServo().setPosition(calibrationPosition);
                 }
-            } else if (!calibrationMode && calibrationLoaded && !opposingArmRequests()) {
+            } else if (!calibrationMode && calibrationLoaded) {
                 if (l2Pressed && !r2Pressed) armPosition = 0.0;
                 else if (r2Pressed && !l2Pressed) armPosition = 1.0;
                 else if (!l2Pressed && !r2Pressed) armPosition += direction * ARM_RATE_PER_SECOND * seconds;
@@ -868,12 +731,12 @@ public class FinalRebuilds extends OpMode {
         }
         armPosition = Range.clip(armPosition, 0.0, 1.0);
 
-        boolean crossPressed = controls.crossPressed;
-        boolean squarePressed = controls.squarePressed;
+        boolean crossPressed = gamepad1.a && !wasCrossPressed;
+        boolean squarePressed = gamepad1.x && !wasSquarePressed;
         if (crossPressed || squarePressed) {
             if (!calibrationMode) {
                 armMessage = "Limits locked. Share enters LEFT setup; Options enters RIGHT setup.";
-            } else if (!movementReleased || optionsPressPending || (controls.a && controls.x)) {
+            } else if (!movementReleased || optionsPressPending || (gamepad1.a && gamepad1.x)) {
                 armMessage = "Release movement/setup controls, then press ONE endpoint button again.";
             } else if (crossPressed) {
                 calibrationLower = calibrationPosition;
@@ -885,11 +748,18 @@ public class FinalRebuilds extends OpMode {
                 armMessage = "RAISED pose selected. Park between endpoints; same setup button saves.";
             }
         }
+        wasCrossPressed = gamepad1.a;
+        wasSquarePressed = gamepad1.x;
         updateArmPresets(movementReleased);
         // No paired command on a mode-transition loop or until both sides are ready.
         if (!calibrationMode && calibrationLoaded && !toggledCalibration && !optionsPressPending) {
             applyArmPositionToBothServos();
         }
+    }
+
+    private boolean[] presetButtons() {
+        // Free buttons: D-pad Left = pickup; L3 = carry; D-pad Right = place.
+        return new boolean[] {gamepad1.dpad_left, gamepad1.left_stick_button, gamepad1.dpad_right};
     }
 
     private void loadArmPresets() {
@@ -908,27 +778,21 @@ public class FinalRebuilds extends OpMode {
     }
 
     private void updateArmPresets(boolean movementReleased) {
+        boolean[] buttons = presetButtons();
         int held = 0;
-        for (int i = 0; i < armPresets.length; i++) {
-            if (controllers[0].presetHeld(i) || controllers[1].presetHeld(i)) held++;
-        }
-        for (int i = 0; i < armPresets.length; i++) {
-            // DUAL-DRIVER TUTORIAL, STEP 5: a shortcut keeps its source controller.
-            // R3 must be on THAT controller. Controller 1 wins only if both make
-            // the same fresh shortcut press together; never perform two saves.
-            int source = controllers[0].presetPressed[i] ? 0 : (controllers[1].presetPressed[i] ? 1 : -1);
-            if (source >= 0) {
-                boolean teach = controllers[source].right_stick_button;
+        for (boolean button : buttons) if (button) held++;
+        for (int i = 0; i < buttons.length; i++) {
+            if (buttons[i] && !wasPresetPressed[i]) {
                 // Existing manual controls take priority. Only one shortcut at
                 // a time; never recall or teach while changing arm calibration.
-                if (held != 1 || !movementReleased || controls.a || controls.x
-                        || controls.back || controls.start || calibrationMode) {
+                if (held != 1 || !movementReleased || gamepad1.a || gamepad1.x
+                        || gamepad1.back || gamepad1.start || calibrationMode) {
                     presetMessage = "Release arm controls; use ONE preset button outside calibration.";
                 } else if (!calibrationLoaded) {
                     presetMessage = "Presets inactive until BOTH servos are calibrated.";
-                } else if (teach && !driveSticksCentered()) {
+                } else if (gamepad1.right_stick_button && !driveSticksCentered()) {
                     presetMessage = "Center drive sticks before teaching a preset.";
-                } else if (teach) {
+                } else if (gamepad1.right_stick_button) {
                     // Share now selects LEFT calibration. Hold R3 + shortcut to
                     // teach the CURRENT shared progress instead. Wait
                     // for the mechanism to settle first; no sensor measures it.
@@ -958,6 +822,7 @@ public class FinalRebuilds extends OpMode {
                     presetMessage = presetNames[i] + " target commanded to BOTH servos.";
                 }
             }
+            wasPresetPressed[i] = buttons[i];
         }
     }
 
@@ -1030,17 +895,13 @@ public class FinalRebuilds extends OpMode {
     }
 
     private void showDriveControlsTelemetry() {
-        // Both assigned controllers have the same controls. These raw readings
-        // and source labels help explain priority while both drivers are active.
+        // Watch these while pressing buttons. Input on controller 2 does not
+        // control this OpMode; assign the driving controller as controller 1.
         telemetry.addData("Controller 1 L1/R1/Circle", "%b / %b / %b",
                 gamepad1.left_bumper, gamepad1.right_bumper, gamepad1.b);
         telemetry.addData("Controller 2 L1/R1/Circle", "%b / %b / %b",
                 gamepad2.left_bumper, gamepad2.right_bumper, gamepad2.b);
-        telemetry.addData("Precision button held", gamepad1.left_bumper || gamepad1.right_bumper
-                || gamepad2.left_bumper || gamepad2.right_bumper);
-        telemetry.addData("Driving controller", "Controller %d (1 wins when its sticks move)", driveController + 1);
-        telemetry.addData("Calibration controller", calibrationController >= 0
-                ? "Controller " + (calibrationController + 1) : "None - either may enter");
+        telemetry.addData("Precision button held", gamepad1.left_bumper || gamepad1.right_bumper);
         telemetry.addData("Selected drive mode", fieldCentric ? "Field-centric" : "Robot-centric");
         telemetry.addData("Circle switches detected", driveModeChanges);
         telemetry.addData("Heading hold tolerance (degrees)", "%.1f",
@@ -1053,15 +914,14 @@ public class FinalRebuilds extends OpMode {
     }
 
     private void showArmTelemetry() {
-        telemetry.addData("Code", "FinalRebuilds - dual drivers + individual/synchronized calibration");
+        telemetry.addData("Code", "FinalRebuilds - individual + synchronized calibration");
         showDriveControlsTelemetry();
         telemetry.addData("Arm mode", calibrationMode
                 ? (synchronizedCalibrationSelected ? "SYNC BOTH CALIBRATION - drive stopped"
                         : servoNames[calibrationServo] + " CALIBRATION - drive stopped")
                 : (calibrationLoaded ? "Normal - paired mappings" : "Needs BOTH calibrations - arm commands disabled"));
         telemetry.addLine("Individual: Share LEFT / tap Options RIGHT. Hold Options 1s: switch setup style.");
-        telemetry.addLine("Both controllers: L2 minimum / R2 maximum; D-pad adjusts; opposite requests hold.");
-        telemetry.addLine("R3 + preset on the SAME controller teaches. Setup belongs to the controller that entered.");
+        telemetry.addLine("Normal: L2 minimum / R2 maximum; D-pad adjusts; release holds.");
         telemetry.addData("Arm COMMAND progress (%)", "%.1f", armPosition * 100.0);
         telemetry.addData("Saved parking progress (%)", "%.1f", armStartupPosition * 100.0);
         for (int i = 0; i < servoCalibrated.length; i++) {
@@ -1092,12 +952,6 @@ public class FinalRebuilds extends OpMode {
                 gamepad1.left_trigger, gamepad1.right_trigger);
         telemetry.addData("Controller 1 Share / Options / R3", "%b / %b / %b",
                 gamepad1.back, gamepad1.start, gamepad1.right_stick_button);
-        telemetry.addData("Controller 2 Up/Down/Cross/Square", "%b / %b / %b / %b",
-                gamepad2.dpad_up, gamepad2.dpad_down, gamepad2.a, gamepad2.x);
-        telemetry.addData("Controller 2 L2 / R2", "%.2f / %.2f",
-                gamepad2.left_trigger, gamepad2.right_trigger);
-        telemetry.addData("Controller 2 Share / Options / R3", "%b / %b / %b",
-                gamepad2.back, gamepad2.start, gamepad2.right_stick_button);
         // getPosition() reports the last target, not shaft feedback.
         telemetry.addData("Servo COMMANDS left / right", "%.3f / %.3f",
                 servoMotorLeft.getPosition(), servoMotorRight.getPosition());

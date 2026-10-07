@@ -791,7 +791,7 @@ boolean squarePressed = gamepad1.dpad_left && !wasSquarePressed;
                 // a time; never recall or teach while changing arm calibration.
                 if (held != 1 || !movementReleased || gamepad1.dpad_down || gamepad1.dpad_left
                         || gamepad1.back || gamepad1.start || calibrationMode) {
-                    presetMessage = "Release arm controls; use ONE preset button outside calibration.";
+                    presetMessage = "Finish calibration. Let go of other arm buttons. Press one preset button to use a saved arm position.";
                 } else if (!calibrationLoaded) {
                     presetMessage = "Presets inactive until BOTH servos are calibrated.";
                 } else if (gamepad1.right_stick_button && !driveSticksCentered()) {

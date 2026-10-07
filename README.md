@@ -8,13 +8,13 @@ FTC TeleOp code for a four-motor mecanum robot with two positional servos drivin
 
 | Area | Features |
 | --- | --- |
-| Drivetrain | Field-centric and robot-centric modes; heading reset; heading hold during translation; automatic IMU fallback |
+| Drivetrain | Field-centric and robot-centric modes; heading reset; heading hold during translation with a 1° tolerance; automatic IMU fallback |
 | Drive power | Full-power normal commands; hold-to-use 35% precision mode; stick deadband; wheel-power normalization; BRAKE at zero power |
 | Arm | Separate endpoint mappings for facing servos; gradual D-pad movement; holding the last target; direct endpoint commands with triggers |
 | Calibration | Individual LEFT/RIGHT setup; synchronized paired setup; validated endpoints and parking position; shared command bounds |
 | Presets | Optional Pickup, Carry and Place positions; R3 teaching; inactive unset shortcuts |
 | Settings | Persistent calibration and presets; confirmed saves; cache rollback and attempted disk recovery on failed writes |
-| Telemetry | Calibration mode and selected side; drive mode and power; controller inputs; saved endpoints; commanded arm progress; preset and storage status |
+| Telemetry | Calibration mode and selected side; drive mode and power; controller inputs; saved endpoints; commanded arm progress; preset and storage status; per-Hub current readings and their sum |
 
 No drive acceleration ramp is applied. Encoder speed control is present as an option but remains disabled until wiring and motor configuration are verified.
 
@@ -71,7 +71,7 @@ Calibration buttons operate after PLAY. Presets never activate automatically dur
 | Tap Triangle | Reset field-forward to the current facing direction |
 | PLAY | Set the initial field-forward heading |
 
-Field-centric movement follows the heading reference even after the robot turns. Robot-centric movement follows the robot's current facing direction. Heading hold operates during field-centric translation with valid yaw and no manual turn; stopping or turning releases its target.
+Field-centric movement follows the heading reference even after the robot turns. Robot-centric movement follows the robot's current facing direction. Heading hold operates during field-centric translation with valid yaw and no manual turn; stopping or turning releases its target. Errors of 1° or less produce no automatic turn correction. The original target is retained, so accumulated drift beyond 1° is corrected with the existing gain and correction limit.
 
 Calibration stops the chassis. Holding Options also stops the chassis and pauses arm adjustment while the code distinguishes a short press from a long press. BRAKE reduces coasting at zero power; it does not lock wheel position. Full power and 35% precision describe commands, not measured travel speed.
 
@@ -162,6 +162,14 @@ The calibration indicator reports LEFT ONLY, RIGHT ONLY or SYNC BOTH with CHASSI
 
 **Servo telemetry reports targets, not measured shaft angles or arm heights.** Commands are issued consecutively; the code cannot verify physical synchronization, settling or a stall. STOP commands zero drive power without deliberately retargeting the arm or disabling its holding torque; normal SDK/controller STOP behavior still applies.
 
+## Hub current monitoring
+
+Current telemetry is available during INIT and PLAY. The code discovers configured REV Hubs automatically, samples current about twice per second and displays **Hub 1 current (A)**, additional Hub rows when present, and **Hub current sum (A)**. No extra sensor or configuration name is required.
+
+To compare arm load, stop driving, lower the arm and wait for it to settle before recording current. Repeat with the arm raised while the chassis remains still. These are whole-Hub readings, not individual servo measurements. Devices powered outside the Hubs, such as a separate servo power injector, are not included in the Hub sum; it is not a complete battery-current measurement.
+
+Between samples, telemetry reuses the last reading. A missing Hub, invalid reading or caught read failure is shown as **Unavailable**. The sum is unavailable if any Hub reading is unavailable, so a partial sum cannot look misleadingly low. Monitoring is informational and does not change drive power or arm targets. No automatic current cutoff or stall detection is added.
+
 ## Troubleshooting
 
 | Symptom | Check |
@@ -176,7 +184,7 @@ The calibration indicator reports LEFT ONLY, RIGHT ONLY or SYNC BOTH with CHASSI
 
 ## Validation and limitations
 
-The latest simulated checks passed **31,073 assertions** for driving, individual/SYNC calibration, paired mapping, button timing, presets and settings persistence. They compile the actual Java source against minimal API doubles.
+The latest simulated checks passed **31,288 assertions** for driving, individual/SYNC calibration, paired mapping, button timing, presets, settings persistence, the heading tolerance and Hub current polling/failure recovery. They compile the actual Java source against minimal API doubles.
 
 With Python 3 and a JDK providing `javac` and `java`, run from this folder:
 

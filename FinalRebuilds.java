@@ -494,7 +494,7 @@ public class FinalRebuilds extends OpMode {
     }
 
     private boolean anyPresetButton() {
-        return gamepad1.dpad_left || gamepad1.left_stick_button || gamepad1.dpad_right;
+        return gamepad1.x || gamepad1.left_stick_button || gamepad1.b;
     }
 
     private Servo selectedCalibrationServo() {
@@ -601,7 +601,7 @@ public class FinalRebuilds extends OpMode {
         armTimer.reset();
         boolean l2Pressed = gamepad1.left_trigger > 0.5;
         boolean r2Pressed = gamepad1.right_trigger > 0.5;
-        boolean movementReleased = !gamepad1.dpad_up && !gamepad1.dpad_down
+        boolean movementReleased = !gamepad1.y && !gamepad1.a
                 && !l2Pressed && !r2Pressed;
         boolean toggledCalibration = false;
 
@@ -707,8 +707,8 @@ public class FinalRebuilds extends OpMode {
         wasOptionsPressed = gamepad1.start;
 
         double direction = 0.0;
-        if (gamepad1.dpad_up && !gamepad1.dpad_down) direction = 1.0;
-        else if (gamepad1.dpad_down && !gamepad1.dpad_up) direction = -1.0;
+        if (gamepad1.y && !gamepad1.a) direction = 1.0;
+        else if (gamepad1.a && !gamepad1.y) direction = -1.0;
         if (!toggledCalibration && !optionsPressPending && !gamepad1.a && !gamepad1.x) {
             if (calibrationMode && !l2Pressed && !r2Pressed && direction != 0.0) {
                 if (synchronizedCalibrationSelected) {
@@ -759,7 +759,7 @@ public class FinalRebuilds extends OpMode {
 
     private boolean[] presetButtons() {
         // Free buttons: D-pad Left = pickup; L3 = carry; D-pad Right = place.
-        return new boolean[] {gamepad1.dpad_left, gamepad1.left_stick_button, gamepad1.dpad_right};
+        return new boolean[] {gamepad1.x, gamepad1.left_stick_button, gamepad1.b};
     }
 
     private void loadArmPresets() {
@@ -947,7 +947,7 @@ public class FinalRebuilds extends OpMode {
                 presetLabel(0), presetLabel(1), presetLabel(2));
         telemetry.addData("Preset status", presetMessage);
         telemetry.addData("Controller 1 Up/Down/Cross/Square", "%b / %b / %b / %b",
-                gamepad1.dpad_up, gamepad1.dpad_down, gamepad1.a, gamepad1.x);
+                gamepad1.y, gamepad1.a, gamepad1.a, gamepad1.x);
         telemetry.addData("Controller 1 L2 / R2", "%.2f / %.2f",
                 gamepad1.left_trigger, gamepad1.right_trigger);
         telemetry.addData("Controller 1 Share / Options / R3", "%b / %b / %b",

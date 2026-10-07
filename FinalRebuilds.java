@@ -758,12 +758,7 @@ boolean squarePressed = gamepad1.dpad_left && !wasSquarePressed;
         if (!calibrationMode && calibrationLoaded && !toggledCalibration && !optionsPressPending) {
             applyArmPositionToBothServos();
         }
-
-        if (held != 1 || !movementReleased
-        || gamepad1.dpad_down || gamepad1.dpad_left
-        || gamepad1.back || gamepad1.start || calibrationMode) {
-    presetMessage = "Release arm controls; use ONE preset button outside calibration.";
-}
+        
     }
 
     private boolean[] presetButtons() {
@@ -794,7 +789,7 @@ boolean squarePressed = gamepad1.dpad_left && !wasSquarePressed;
             if (buttons[i] && !wasPresetPressed[i]) {
                 // Existing manual controls take priority. Only one shortcut at
                 // a time; never recall or teach while changing arm calibration.
-                if (held != 1 || !movementReleased || gamepad1.a || gamepad1.x
+                if (held != 1 || !movementReleased || gamepad1.dpad_down || gamepad1.dpad_left
                         || gamepad1.back || gamepad1.start || calibrationMode) {
                     presetMessage = "Release arm controls; use ONE preset button outside calibration.";
                 } else if (!calibrationLoaded) {
